@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+pyjwt
+authlib
+requests
+python-dotenv
