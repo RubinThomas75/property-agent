@@ -1,5 +1,6 @@
-Set up
+# Project Setup
 
+```bash
 repo/
 │── app/
 │   ├── api/
