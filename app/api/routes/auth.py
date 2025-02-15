@@ -2,65 +2,79 @@ import os
 import jwt
 import requests
 import datetime
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from app.api.dependencies import get_db_connection  # ✅ Import shared DB function
 
-# ✅ Define router
 router = APIRouter()
-
-print("✅ auth.py is being loaded!", flush=True)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key")
 
-# ✅ Define request model
 class GoogleTokenRequest(BaseModel):
     token: str
 
 def verify_google_token(token: str):
-    """ Verifies the Google ID Token and extracts user info """
     GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
     google_url = f"https://oauth2.googleapis.com/tokeninfo?id_token={token}"
 
-    print(f"🔍 Verifying token with Google: {google_url}", flush=True)
-
     response = requests.get(google_url)
-    print(f"📡 Google API Response Code: {response.status_code}", flush=True)
-    print(f"📡 Google API Response: {response.text}", flush=True)
-
     if response.status_code != 200:
         raise HTTPException(status_code=400, detail="Invalid Google token")
 
     payload = response.json()
     if payload.get("aud") != GOOGLE_CLIENT_ID:
-        print(f"❌ Invalid Audience: Expected {GOOGLE_CLIENT_ID}, Got {payload.get('aud')}", flush=True)
         raise HTTPException(status_code=400, detail="Invalid audience")
 
-    print("✅ Google Token Verified Successfully!", flush=True)
-    return payload  # ✅ Returns user's Google profile data
+    return payload
 
-
-# ✅ Correctly defined endpoint with POST method
 @router.post("/verify-google")
 async def verify_google(data: GoogleTokenRequest):
-    """ Handles Google Login Token Verification """
+    """ Handles Google Login Token Verification and Stores User in DB """
     google_token = data.token
     if not google_token:
         raise HTTPException(status_code=400, detail="Token is missing")
 
     user_info = verify_google_token(google_token)
 
-    # Generate JWT for backend authentication
+    # Extract user info
+    user_id = user_info["sub"]  # Google User ID
+    email = user_info["email"]
+    name = user_info.get("name", "")
+    picture = user_info.get("picture", "")
+
+    # ✅ Get database connection
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO users (user_id, email, name, picture, last_logged_in)
+            VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (email) DO UPDATE 
+            SET last_logged_in = NOW();
+        """, (user_id, email, name, picture))
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+    # ✅ Generate JWT for backend authentication
     backend_token = jwt.encode(
         {
-            "sub": user_info["email"],
-            "name": user_info["name"],
-            "picture": user_info["picture"],
+            "sub": email,
+            "name": name,
+            "picture": picture,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
         },
         JWT_SECRET,
         algorithm="HS256",
     )
 
-    print("✅ Login successful", flush=True)
     return JSONResponse(content={"token": backend_token})
